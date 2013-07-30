@@ -36,30 +36,6 @@ var querystring = require('querystring');
 //emitter.setMaxListeners(0);//http://nodejs.ru/doc/v0.3.x/events.html#emitter.setMaxListeners???
 
 
-/*
-function mDecode(st) {
-  return st;
-  return (new Buffer(String(st).split('').map(function(x) {
-    return x.charCodeAt(0);
-  }))).toString('utf-8');
-}
-
-function mEncode(st) {
-  return st;
-  var x = (new Buffer(String(st)));
-  return [].map.call(x, function (z) {
-    return String.fromCharCode(z);
-  }).join('');
-}
-*/
-
-
-function mysqlEscape(st) {//needs test
-  //return String(st); //!
-  //backslashes  for  following characters: \x00, \n, \r, \, ', " and \x1a. 
-  return String(st).replace(/[\x00\n\r\\'"\x1a]/g, '\\$&');
-}
-
 var Database = require("./websql.js").Database;
 
 function dbConnect() {
@@ -78,8 +54,10 @@ function saveToDb(msg, callback) {
   db.transaction(function (t) {
     t.executeSql(sql);
 
+    var bindings = [];
     sql = 'INSERT INTO nodejsChat SET ' + Object.keys(msg).map(function (field) {
-      return '`' + field + '` = "' + mysqlEscape(msg[field]) + '"';
+      bindings.push(msg[field]);
+      return '`' + field + '` = ?';      
     }).join(', ');
 
     //sys.puts(sys.inspect(sql));//!  
@@ -127,10 +105,11 @@ function getUser(query, callback) {
     kuid = query.kuid || '',
     db = dbConnect(),
     to = +query.to || 0,//to тут лишнее! нужно было быстренько сделать ...
-    qr = "SELECT uname, user_avatar AS avatar, uid FROM kpro_user LEFT JOIN kpro_usergroup USING (ugroup) WHERE (uid = '" + mysqlEscape(kuid) + "' AND secondpass = MD5('" + mysqlEscape((secondpass)) + "')) OR uid = '" + mysqlEscape(to) + "' LIMIT 2",
+    qr = "SELECT uname, user_avatar AS avatar, uid FROM kpro_user LEFT JOIN kpro_usergroup USING (ugroup) WHERE (uid = ? AND secondpass = MD5(?)) OR uid = ? LIMIT 2",
     results = {};
+
   db.transaction(function (tx) {
-    tx.executeSql(qr, null, function (tx, result) {
+    tx.executeSql(qr, [kuid, secondpass, to], function (tx, result) {
       var i = -1;
       while (++i < result.rows.length) {
         var x = result.rows[i];
