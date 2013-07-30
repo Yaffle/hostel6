@@ -23,12 +23,7 @@ process.on('uncaughtException', function (e) {
 });
 */
 
-var dbConfig = {
-  db: "site",
-  user: "root",
-  pass: ""
-};
-
+var dbConfig = require("./config.js");
 var http = require('http');
 var https = require('https');
 var sys = require('sys');
@@ -39,6 +34,7 @@ var emitter = new EventEmitter();
 
 var querystring = require('querystring');
 //emitter.setMaxListeners(0);//http://nodejs.ru/doc/v0.3.x/events.html#emitter.setMaxListeners???
+
 
 /*
 function mDecode(st) {
@@ -64,19 +60,11 @@ function mysqlEscape(st) {//needs test
   return String(st).replace(/[\x00\n\r\\'"\x1a]/g, '\\$&');
 }
 
+var Database = require("./websql.js").Database;
 
 function dbConnect() {
-  var db = require('mysql-native').createTCPClient();
-  db.auto_prepare = true;
-  db.auth(dbConfig.db, dbConfig.user, dbConfig.pass);
-
-  db.query("SET CHARACTER SET utf8");
-  db.query("SET NAMES utf8");
-  db.query("SET CHARACTER_SET_RESULTS=utf8");
-  
-  return db;
+  return new Database(dbConfig);
 }
-
 
 function saveToDb(msg, callback) {
   var db = dbConnect(),
@@ -87,18 +75,20 @@ function saveToDb(msg, callback) {
     return '`' + field + '` TEXT';
   }).join(', ');
   sql += ') DEFAULT CHARSET=utf8';
-  db.query(sql).addListener('end', function () {
+  db.transaction(function (t) {
+    t.executeSql(sql);
 
     sql = 'INSERT INTO nodejsChat SET ' + Object.keys(msg).map(function (field) {
       return '`' + field + '` = "' + mysqlEscape(msg[field]) + '"';
     }).join(', ');
 
-    sys.puts(sys.inspect(sql));//!  
-    db.query(sql).addListener('end', function () {
-      setTimeout(callback, 1);//?
-      db.close();
-    });
-
+    //sys.puts(sys.inspect(sql));//!  
+    t.executeSql(sql);
+  }, function () {
+    exit();//?
+  }, function () {
+    setTimeout(callback, 1);//?
+    db.close();
   });
 }
 
@@ -139,10 +129,18 @@ function getUser(query, callback) {
     to = +query.to || 0,//to тут лишнее! нужно было быстренько сделать ...
     qr = "SELECT uname, user_avatar AS avatar, uid FROM kpro_user LEFT JOIN kpro_usergroup USING (ugroup) WHERE (uid = '" + mysqlEscape(kuid) + "' AND secondpass = MD5('" + mysqlEscape((secondpass)) + "')) OR uid = '" + mysqlEscape(to) + "' LIMIT 2",
     results = {};
-  db.query(qr).addListener('row', function (r) {
-    results[r.uid] = r;
-  }).addListener('end', function () {
-    db.close();
+  db.transaction(function (tx) {
+    tx.executeSql(qr, null, function (tx, result) {
+      var i = -1;
+      while (++i < result.rows.length) {
+        var x = result.rows[i];
+        results[x.uid] = x;
+      }
+    });
+  }, function () {
+    exit();//?
+  }, function () {
+    db.close();//TODO: remove
     callback(results[kuid] || null, results[to] || null);
   });
 }
@@ -375,7 +373,7 @@ function requestListener(req, res) {
       'Access-Control-Allow-Origin': '*'
     });
 
-    if ((request.headers.accept || '').indexOf('text/event-stream') === -1) {
+    if ((req.headers.accept || '').indexOf('text/event-stream') === -1) {
       // 2 kb comment message for XDomainRequest (IE8, IE9)
       res.write(':' + Array(129).join('0123456789ABCDEF') + '\n');
     } else {
@@ -456,8 +454,8 @@ function requestListener(req, res) {
         }
       }
     }
-    
-    
+
+
     var userId = user ? user.uid : null;
 
     function sendSignals() {
@@ -509,12 +507,18 @@ function requestListener(req, res) {
       if (!lastEventId) {//!
         qr += " DESC LIMIT 1";//отдаем только одно сообщение первый раз...
       }
-
-      db.query(qr).addListener('row', function (msg) {
-        constructSSE(res, +msg.id, msg, pcSignalId);
-        someSended  = true;
-        lastEventId = +msg.id;
-      }).addListener('end', function () {
+      
+      db.transaction(function (tx) {
+        tx.executeSql(qr, null, function (tx, result) {
+          result.rows.forEach(function (msg) {
+            constructSSE(res, +msg.id, msg, pcSignalId);
+            someSended  = true;
+            lastEventId = +msg.id;
+          });
+        });
+      }, function () {
+       exit();//?
+      }, function () {
         db.close();
         if (someSended && polling) {//longpolling
           end();
@@ -720,8 +724,7 @@ function requestListener(req, res) {
   } else {
     //
     var m = req.url.split('?')[0].match(/^\/history\/(\d+)\/?$/),
-      upper,
-      toSend;
+      upper;
     if (m && m[0]) {
       upper = +m[1];
       res.writeHead(200, {
@@ -733,11 +736,14 @@ function requestListener(req, res) {
       // отправляем ответом JSON - до 10 сообщений пользователю с id < upper
       db = dbConnect();
       qr = "SELECT * FROM nodejsChat WHERE id < " + upper + " ORDER BY id DESC LIMIT 16";
-      toSend = [];
 
-      db.query(qr).addListener('row', function (msg) {
-        toSend.push(msg);
-      }).addListener('end', function () {
+      db.transaction(function (tx) {
+        tx.executeSql(qr, null, function (tx, result) {
+          toSend = result.rows;
+        });
+      }, function () {
+      
+      }, function () {
         res.write(JSON.stringify(toSend));
         res.end();
         db.close();
